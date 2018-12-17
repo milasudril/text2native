@@ -1,0 +1,6 @@
+[submodule "analib"]
+	path = analib
+	url = https://github.com/milasudril/analib
+[submodule "alice"]
+	path = alice
+	url = https://github.com/milasudril/alice
