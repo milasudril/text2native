@@ -6,11 +6,12 @@
 #include <cstring>
 #include <algorithm>
 #include <cstdint>
+#include <clocale>
 
 ALICE_OPTION_DESCRIPTOR(OptionDescriptor
 	,{"General" ,"help","Print usage information","string",Alice::Option::Multiplicity::ZERO_OR_ONE}
 	,{"Input options","type","Data type to decode","type identifier",Alice::Option::Multiplicity::ONE}
-	,{"Input options","locale", "The locale used to decode floating point numberes", "string", Alice::Option::Multiplicity::ONE}
+	,{"Input options","locale", "The locale used to decode floating point numberes. By default, it is set to the LC_NUMERIC value of the parent process.", "string", Alice::Option::Multiplicity::ONE}
 	);
 
 namespace Alice
@@ -43,25 +44,148 @@ using SupportedTypes = Analib::TypeSet
 	,double
 	>;
 
+template<int N>
+class FixedBuffer
+	{
+	public:
+		FixedBuffer():m_insert_pos(0), m_data{} {}
+
+		void push_back(char ch_in)
+			{
+			if(m_insert_pos >= N)
+				{
+				Alice::ErrorMessage msg{};
+				sprintf(msg.data, "Token too long: %d (%d)", m_insert_pos, N);
+				throw msg;
+				}
+			m_data[m_insert_pos] = ch_in;
+			++m_insert_pos;
+			}
+
+		void clear()
+			{
+			m_insert_pos=0;
+			m_data[0] = '\0';
+			}
+
+		char const* c_str() const
+			{return m_data.data();}
+
+		static constexpr auto npos = N;
+
+	private:
+		int m_insert_pos;
+		std::array<char, N> m_data;
+	};
+
+template<class BufferType>
+[[nodiscard]] bool readData(FILE* src, BufferType& buffer)
+	{
+	int ch_in{};
+	while(true) // Eat whitepsace
+		{
+		ch_in = getc(src);
+		if(ch_in==EOF)
+			{return false;}
+		if(!(ch_in>='\0' && ch_in<=' '))
+			{break;}
+		}
+
+	buffer.push_back(ch_in);
+	while(true)
+		{
+		ch_in = getc(src);
+
+		if((ch_in>='\0' && ch_in<=' ') || ch_in==EOF)
+			{
+			buffer.push_back('\0');
+			return true;
+			}
+
+		buffer.push_back(ch_in);
+		}
+	}
+
+template<class BufferType>
+[[noreturn]] void throwOverflowError(BufferType const& buffer)
+	{
+	Alice::ErrorMessage msg{};
+	static_assert(BufferType::npos + 32 <= sizeof(msg));
+	sprintf(msg.data, "Overflow or bad input data: %s", buffer.c_str());
+	throw msg;
+	}
+
+template<class T, class BufferType, class Converter>
+[[nodiscard]] auto convert(BufferType const& buffer, Converter&& conv)
+	{
+	char* ptr{};
+	errno = 0;
+	if constexpr(std::is_integral_v<T>)
+		{
+		auto val = conv(buffer.c_str(), &ptr, 10);
+
+		if(*ptr != '\0' || errno == EINVAL || errno == ERANGE
+			|| val > static_cast<decltype(val)>(std::numeric_limits<T>::max())
+			|| val < static_cast<decltype(val)>(std::numeric_limits<T>::min()))
+			{throwOverflowError(buffer);}
+
+		return static_cast<T>(val);
+		}
+	else
+	if constexpr(std::is_floating_point_v<T>)
+		{
+		auto val = conv(buffer.c_str(), &ptr);
+
+		if(*ptr != '\0' || errno == EINVAL || errno == ERANGE)
+			{throwOverflowError(buffer);}
+
+		return val;
+		}
+	}
+
 class Action
 	{
 	public:
-		Action(std::string const& locale) {}
+		Action(std::string const& locale)
+			{setlocale(LC_NUMERIC, locale.c_str());}
 
 		void operator()(){}
 
-		void operator()(Analib::Empty<int8_t>) {}
-		void operator()(Analib::Empty<int16_t>) {}
-		void operator()(Analib::Empty<int32_t>) {}
-		void operator()(Analib::Empty<int64_t>) {}
+		template<class T>
+		void operator()(Analib::Empty<T>)
+			{
+			FixedBuffer<28> buffer;
+			while(readData(stdin, buffer))
+				{
+				if constexpr(std::is_integral_v<T> && std::is_unsigned_v<T>)
+					{
+					if(*buffer.c_str()=='-')
+						{throwOverflowError(buffer);}
 
-		void operator()(Analib::Empty<uint8_t>) {}
-		void operator()(Analib::Empty<uint16_t>) {}
-		void operator()(Analib::Empty<uint32_t>) {}
-		void operator()(Analib::Empty<uint64_t>) {}
-
-		void operator()(Analib::Empty<float>) {}
-		void operator()(Analib::Empty<double>) {}
+					auto val = convert<T>(buffer, strtoull);
+					fwrite(&val, sizeof(val), 1, stdout);
+					}
+				else
+				if constexpr(std::is_integral_v<T> && !std::is_unsigned_v<T>)
+					{
+					auto val = convert<T>(buffer,  strtoll);
+					fwrite(&val, sizeof(val), 1, stdout);
+					}
+				else
+				if constexpr(std::is_same_v<T, float>)
+					{
+					auto val = convert<T>(buffer, strtof);
+					fwrite(&val, sizeof(val), 1, stdout);
+					}
+				else
+				if constexpr(std::is_same_v<T, double>)
+					{
+					auto val = convert<T>(buffer, strtod);
+					fwrite(&val, sizeof(val), 1, stdout);
+					}
+				buffer.clear();
+				}
+			}
 	};
 
 size_t mapTypeId(std::string const& str)
@@ -90,13 +214,11 @@ int main(int argc, char* argv[])
 			return 0;
 			}
 
-
 		SupportedTypes::select
 			(
 			 mapTypeId(cmd_line.get<Alice::Stringkey("type")>().valueGet())
 			,Action{cmd_line.get<Alice::Stringkey("locale")>().valueGet()}
 			);
-
 
 		return 0;
 		}
