@@ -10,3 +10,9 @@ will output
     00000008
 
 on a little-endian machine.
+
+There is also a inverse command `natve2text` that does the opposite:
+
+    ffmpeg -i dialog.wav -f f32le - | native2text --locale=C --type=f32
+
+This will dump the content of `dialog.wav` into a list of sample values.
